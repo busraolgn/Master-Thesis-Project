@@ -1,0 +1,702 @@
+---
+jupyter:
+  jupytext:
+    text_representation:
+      extension: .Rmd
+      format_name: rmarkdown
+      format_version: '1.2'
+      jupytext_version: 1.4.2
+  kernelspec:
+    display_name: sitenv
+    language: python
+    name: sitenv
+---
+
+<!-- #region -->
+
+
+### Main notebook taking an input, does the filtering for the location and returns pandas dictionary containing data
+
+
+<!-- #endregion -->
+
+```{python}
+import pandas as pd
+import numpy as np
+import requests
+from bs4 import BeautifulSoup as bs4
+
+import io
+import os
+#os.path.join(os.getcwd(),'wave-site-studies','site_data')
+import pathlib
+import warnings
+
+from IPython.display import display, Markdown
+
+import sys
+sys.path.insert(0,'./support')
+sys.path.insert(0,'./site_data/support')
+
+from ipynb.fs.defs.Coordinates import Coordinates
+from ipynb.fs.defs.Sites import wave_columns, Site, File
+from ipynb.fs.defs.Databases import Database
+from ipynb.fs.defs.Grid import Grid,Border
+from ipynb.fs.defs.Periods import Period
+
+from ipynb.fs.defs.wave_data_qc import df_monthly_comparison
+```
+
+```{python}
+NotebookPATH = './wave-site-studies/site_data/'
+currPath=pathlib.Path().absolute()
+```
+
+```{python}
+'''
+Function for scrapping the webpage containing table of stations with their coordinates.
+
+For the subset of dataset, see https://erddap.marine.ie/erddap/tabledap/IWaveBNetwork_spectral.subset
+
+Since there are different locations belonging to same station, 
+function also takes the mean of every lat,lon value of each station.
+
+Two new column added to the dataframe which consist stations' max and min distances to the mean coordinate value.
+'''
+def get_Ireland_buoy_list():
+    
+    url = 'https://erddap.marine.ie/erddap/tabledap/IWaveBNetwork_spectral.subset'
+    response = requests.get(url).text
+        
+    buoy_list = pd.read_html(str(response),skiprows=[1],header=[0],attrs={"class":"erd commonBGColor nowrap"})[0]
+    buoy_list.columns=['Station_ID','Station_Name','Latitude','Longitude']
+        
+    #Station Ids are not proper
+    buoy_list.drop('Station_ID', axis=1, inplace=True) 
+    
+    #Same buoy exist in different locations. Define a mean value for the locations
+    #Since a buoy with one unusual coordinate has detected, need to eliminate it. the buoy is Amets Berth A Wave Buoy with latitude 57,...  
+    old_list = buoy_list.copy()
+    
+    #site name will be index with the groupby func..
+    buoy_list = buoy_list.groupby(['Station_Name']).mean()
+    
+    for index,row in old_list.iterrows():
+        c1 = Coordinates(float(row['Latitude']),float(row['Longitude']))
+        #mean value
+        c2 = Coordinates(float(buoy_list.loc[row.Station_Name , 'Latitude']),float(buoy_list.loc[row.Station_Name , 'Longitude']))
+        distance = c1.distance(c2)
+        #to eliminate the unusual coordinates
+        if distance > 200:
+            old_list.drop([index], inplace=True)
+
+    buoy_list = old_list.groupby(['Station_Name']).mean()     
+    buoy_list.reset_index(inplace=True)
+    buoy_list['Grid']=Grid('Ireland_MarineInstitute', 'get_Ireland_data', './wave-site-studies/site_data/',Database.Ireland,Period.Tp,None)
+    buoy_list['Latitude']=buoy_list['Latitude'].astype(float).round(2)
+    buoy_list['Longitude']=buoy_list['Longitude'].astype(float).round(2) 
+    
+    return buoy_list
+```
+
+```{python}
+
+def get_Ireland_buoy_list_raw():
+    
+    url = 'https://erddap.marine.ie/erddap/tabledap/IWaveBNetwork_spectral.subset'
+    response = requests.get(url).text
+        
+    buoy_list = pd.read_html(str(response),skiprows=[1],header=[0],attrs={"class":"erd commonBGColor nowrap"})[0]        
+    buoy_list.columns=['Station_ID','Station_Name','Latitude','Longitude']
+    buoy_list['Grid']=Grid('Ireland_MarineInstitute', 'get_Ireland_data', './wave-site-studies/site_data/',Database.Ireland,Period.Tp,None)
+    buoy_list['Latitude']=buoy_list['Latitude'].astype(str)
+    buoy_list['Longitude']=buoy_list['Longitude'].astype(str) 
+    
+    return buoy_list
+```
+
+```{python}
+def get_GoMOOS_buoy_list():  
+    url = 'https://coastwatch.pfeg.noaa.gov/erddap/tabledap/gomoosBuoy.subset'
+
+    response = requests.get(url).text
+    buoy_list = pd.read_html(str(response),skiprows=[1],header=[0],attrs={"class":"erd commonBGColor nowrap"})[0]
+    buoy_list.columns=['Station_ID','Longitude','Latitude']
+    buoy_list['Grid']=Grid('GoMOOS', 'get_Maine_data', './wave-site-studies/site_data/', Database.GoMOOS, Period.Tp, None)
+    buoy_list['Latitude']=buoy_list['Latitude'].astype(float).round(2)
+    buoy_list['Longitude']=buoy_list['Longitude'].astype(float).round(2) 
+    buoy_list.drop_duplicates(subset='Station_ID', inplace=True)
+    buoy_list.reset_index(inplace=True,drop=True)
+    return buoy_list
+```
+
+```{python active="", eval=FALSE}
+get_GoMOOS_buoy_list()
+```
+
+```{python}
+def get_CDIP_buoy_list():
+    #url='http://cdip.ucsd.edu/themes/cdip?pb=1&d2=p2&tz=UTC&ll=0&un=0&u2=tab:2:ibf:1:ibc:1'
+    url='http://cdip.ucsd.edu/themes/cdip?pb=1&d2=p2&tz=UTC&ll=0&un=0&u2=mode:filter:show:none:tab:2'
+    response = requests.get(url).text
+    soup = bs4(response)
+            
+    station_table = soup.find("table" , {"class":"tablesorter table", "id":"myTable_"})    
+    station_list = pd.read_html(str(station_table))[0]
+    station_list.columns=['Station_ID','Station_Name','Data Set Name','Start(UTC)','End(UTC)','Latitude','Longitude','Depth(m)','Funding','Operator']
+    
+    #station_list = station_list[station_list['Station Name'].str.contains(', CA',case=False,regex=False)]
+    station_list = station_list[station_list['Operator'].str.contains('CDIP',case=False,regex=False,na=False)]
+    station_list['Grid']=Grid('California_CDIP', 'get_CDIP_data', './wave-site-studies/site_data/', Database.CDIP, Period.Tp, None)
+    
+    #delete duplicates. There are duplicate records of some stations with the only difference in their datatset name.
+    station_list.drop(['Data Set Name','Start(UTC)','End(UTC)','Funding','Operator'],axis=1,inplace=True)
+    
+    station_list.drop_duplicates(subset='Station_ID', inplace=True)
+    station_list.reset_index(inplace=True, drop=True)
+    #station_list['Latitude']=station_list['Latitude'].astype(str)
+    #station_list['Longitude']=station_list['Longitude'].astype(str)
+    station_list['Latitude']=station_list['Latitude'].astype(float).round(2)
+    station_list['Longitude']=station_list['Longitude'].astype(float).round(2)
+    station_list['Station_ID'] = station_list['Station_ID'].astype(str)
+    
+    return station_list
+```
+
+```{python active="", eval=FALSE}
+get_CDIP_buoy_list()
+```
+
+```{python}
+def get_NDBC_buoy_list():
+    url='https://sdf.ndbc.noaa.gov/stations.shtml'
+    response = requests.get(url).text
+    #buoy_list = pd.read_html(str(response),attrs={"class":"erd commonBGColor nowrap"})[0]
+    soup = bs4(response)
+    
+    station_table = soup.findAll("table")    
+    station_list = pd.read_html(str(station_table))[8]
+    #column names to protect from any update 
+    station_list.columns=['Station_ID','Station_Name','Owner','Latitude','Longitude','Sensor']
+                            
+    #filtering the result list
+    #station_list = station_list[station_list['Owner'].str.contains('NDBC',case=False,regex=False)]
+    station_list = station_list[station_list['Sensor'].str.contains('Waves',case=False,regex=False)]
+    station_list.drop(['Sensor','Owner'],axis=1,inplace=True)
+
+    station_list['Grid']=Grid('NDBC', 'get_NDBC_data', './wave-site-studies/site_data/', Database.NDBC, Period.Tp, None)
+    station_list['Latitude']=station_list['Latitude'].astype(float).round(2)
+    station_list['Longitude']=station_list['Longitude'].astype(float).round(2) 
+    station_list.drop_duplicates(subset='Station_ID', inplace=True)
+    station_list.reset_index(inplace=True, drop=True)
+    #Ndbc has int value stations ids not string.. 
+    station_list['Station_ID'] = station_list['Station_ID'].astype(str)
+    
+    return station_list
+```
+
+```{python active="", eval=FALSE}
+get_platforms_erddap('VHM0')
+```
+
+```{python}
+import glob
+from datetime import datetime, date
+from dateutil.relativedelta import relativedelta
+import xml.etree.ElementTree as et 
+
+def get_platforms_erddap(param):
+    
+    dbID = 'EP_ERD_INT_%s_AL_TS_NRT.subset?EP_PLATFORM_ID,EP_PLATFORM_CODE,EP_PLATFORM_TYPE&.viewDistinctData=10000&.viewRelatedData=0&distinct()'
+    url='https://erddap.emodnet-physics.eu/erddap/tabledap/'+dbID % param
+    response = requests.get(url, verify=False).text
+
+    platforms = pd.read_html(str(response),skiprows=[1],header=[0],attrs={"class":"erd commonBGColor nowrap"})[0]
+    platforms.columns=['Station_ID','Station_Name','Platform_Type']
+    platforms['Station_ID']=platforms['Station_ID'].astype(str)
+    platforms.drop_duplicates(subset='Station_ID', inplace=True)
+    platforms.reset_index(inplace=True, drop=True)
+    
+    return platforms
+
+def get_emodnet_buoy_list():
+#buoy list is saved in a file and loaded from there. The file gets an update every two months. 
+#This is because an Emodnet API needs to be called to get lat,lon values. 
+#And doing that for every station takes time like 5 mins.
+#File name is the date it got its' last update.
+    allErddapStations = pd.DataFrame()
+    
+    if os.path.split(os.getcwd())[1] == 'site_data':path='./'
+    else:path='./site_data/'
+    path += './data/buoy_list/'
+    if not os.path.exists(path):
+        os.makedirs(path)
+    file = glob.glob(path + 'Emodnet_platforms_*.csv')
+    
+    if len(file):
+        file=file[0]
+        #name of the file has a format. The date comes after '_' before '.csv' :
+        dateofUpdate = file.split('/')[-1].split('_')[-1].split('.')[0]
+        dateofUpdate = datetime.strptime(dateofUpdate, '%Y%m%d')
+        two_months = date.today() + relativedelta(months=-2)
+        dateofUpdate = datetime.date(dateofUpdate)
+
+        if two_months <= dateofUpdate:
+            #print('getting platforms from a file')
+            allErddapStations = pd.read_csv(file)
+            allErddapStations.reset_index(inplace=True, drop=True)
+            
+    if allErddapStations.empty:
+        print('emodnet platforms list needs to be updated. This might take time around 5 mins. getting platforms from emodnet erddap ...')
+        
+        #Since vhm0 is the only height that will be used for now, only common ids in periods list are included and used.
+        #Data without period won't be useful.
+        #Order of the variable list is important. It's based on priority. Eg. VTPK should be used as the principal period var. 
+        #So drop duplicates will take the first ones and delete the last existings.  
+        varlist=['VTPK','VTZA','VTM02','VTM10']
+        vhm0 = get_platforms_erddap('VHM0')
+        common=pd.DataFrame()
+
+        for var in varlist:
+            platforms=get_platforms_erddap(var)
+            allErddapStations = allErddapStations.append(platforms, ignore_index=True)
+
+        allErddapStations.drop('Platform_Type', axis=1, inplace=True)
+        allErddapStations.drop_duplicates(subset='Station_ID', inplace=True)
+        allErddapStations.reset_index(inplace=True, drop=True)
+
+        for i,r in allErddapStations.iterrows():
+            if (vhm0['Station_ID'] == (r['Station_ID'])).any():
+                url= 'https://www.emodnet-physics.eu/Map/service/WSEmodnet2.aspx?q=GetPlatformId&PlatformID=%s' % str(r['Station_ID'])
+                response = requests.get(url).text
+                xml_root = et.fromstring(response)
+                platform = xml_root.findall('Platform') 
+                if platform:
+                    r['Latitude'] = platform[0].find('Latitude').text
+                    r['Longitude'] = platform[0].find('Longitude').text
+                    r['LastDataMeasured'] = platform[0].find('LastDataMeasured').text
+                    params= platform[0].find('Parameters').text
+                    params = list(params.split(';'))
+                    if 'VTPK' in params: r['Ttype'] = 'Tp'
+                    elif 'VTM10' in params: r['Ttype'] = 'Te'
+                    else: r['Ttype'] = 'Tz'
+                        
+                    common=common.append(r)
+                    
+        allErddapStations=common
+        allErddapStations.reset_index(inplace=True, drop=True)
+        file = 'Emodnet_platforms_%s.csv' % date.today().strftime('%Y%m%d')
+        allErddapStations.to_csv(path + file, index=False)
+        
+    #allErddapStations['Grid']=Grid('EMODnet_Physics', 'get_Emodnet_data', './wave-site-studies/site_data/', Database.Emodnet, None, None)
+    grid_all = pd.Series(dtype=object)
+    for i,r in allErddapStations.iterrows():
+        #allErddapStations.iloc[i].Grid.Ttype = Period(r['Ttype'])
+        grid_all = grid_all.append(pd.Series(Grid('EMODnet_Physics', 'get_Emodnet_data', './wave-site-studies/site_data/', Database.Emodnet, Period(r['Ttype']), None), index =[allErddapStations.index[i]]))
+    allErddapStations['Grid'] = grid_all        
+    
+    allErddapStations.drop('Ttype', axis=1, inplace=True)
+    allErddapStations['Station_ID'] = allErddapStations['Station_ID'].astype(str)
+    allErddapStations['Latitude']= allErddapStations['Latitude'].astype(str).str.replace(',','.', regex=False).astype(float).round(2)
+    allErddapStations['Longitude']= allErddapStations['Longitude'].astype(str).str.replace(',','.', regex=False).astype(float).round(2)
+    
+    return allErddapStations
+```
+
+```{python active="", eval=FALSE}
+get_emodnet_buoy_list()
+```
+
+```{python}
+def get_buoy_network():
+#     df1 = get_Ireland_buoy_list()
+#     df2 = get_GoMOOS_buoy_list()
+    df3 = get_CDIP_buoy_list()
+    df4 = get_NDBC_buoy_list()
+#     df5 = get_emodnet_buoy_list()
+
+    buoy_network = pd.concat([df4,df3], axis=0, ignore_index=True, sort=False)
+
+#     buoy_network = pd.concat([df1,df2,df4,df3,df5], axis=0, ignore_index=True, sort=False)
+    #buoy_network = pd.concat([df1,df2,df3,df4,df5], axis=0, sort=False, keys=['ireland','gomoos','cdip','ndbc','emodnet'])
+    #Those which has missing of either station name or id, will be assigned the same value as the other attribute.
+    buoy_network['Station_ID'] = buoy_network['Station_ID'].fillna(buoy_network['Station_Name'])
+    buoy_network['Station_Name'] = buoy_network['Station_Name'].fillna(buoy_network['Station_ID'])
+    
+    #buoy_network.drop_duplicates(subset='Station_ID',inplace=True)
+    #buoy_network['Station_ID'] = buoy_network['Station_ID'].astype(str)
+    
+    return buoy_network
+```
+
+```{python}
+def get_buoy_data_from_sources(sites, time_start, time_end, swell=False, max_distance=200):
+    Data = {}
+    stations = pd.DataFrame()
+
+    start_year = int(time_start[0:4])
+    end_year = int(time_end[0:4])
+    #since this nb may be running from other directories..
+    #find the root directory
+    
+    #J_ROOT = os.readlink('/proc/%s/cwd' % os.environ['JPY_PARENT_PID'])
+    #current directory
+    #curr_path=os.getcwd()
+    #change dir
+    #os.chdir(J_ROOT)
+    #os.chdir(NotebookPATH)
+    #now we can directly use grid.name
+    
+    #and at the end change dir back to the old one
+    
+    #Above solution did not work for all systems. Root is the starting point of jupyter notebook and can differ from terminal.
+    #Current solution is path split written below
+    path = os.path.split(pathlib.Path().absolute())
+    path_tail = path[1]
+    
+    if path_tail == 'wave-site-studies':
+        os.chdir('./site_data')
+        
+    elif path_tail != 'site_data':
+        print('The path is not accurate, please change it')
+        
+    buoy_network = get_buoy_network()
+    buoy_network['distance'] = None
+
+    for site in sites: 
+        display(Markdown('## '+site.name))
+        min_dist=max_distance
+        buoys=pd.DataFrame(dtype=object)
+        closest_buoy=pd.DataFrame(dtype=object)
+        selected_buoy=None
+        site_data=pd.DataFrame(dtype=object)
+        
+        if site.file:
+            notebook = site.file.nb_name
+            func = site.file.function_name
+            %run $notebook
+            site_data, Ttype = globals()[func](site)
+                
+        if site.force_db:
+            stations = buoy_network[buoy_network['Grid'].apply(lambda x: x.database == site.force_db)]
+            #print('stations:')
+            #display(stations)
+            #if it returned an empty dataframe, then direct to gridded model data
+            #if a model data is wanted..
+            if stations.empty:
+                print('Getting data from grid system (model data)...')
+                %run Wave_grid_filter.ipynb
+                site_data,Ttype = get_model_data(site)
+
+        if site.force_id:
+            station = buoy_network[buoy_network['Station_ID']==str(site.force_id)]
+            #station = buoy_network[buoy_network['Station_ID']==str(site.force_id)]
+            if not station.empty:
+                print('force_id station found:')
+                display(station)
+                station = station.iloc[0]
+                #grid=(station.Grid)
+                notebook = station['Grid'].name+'.ipynb'
+                func = station['Grid'].function
+                %run $notebook
+                #eval(func) #to use eval, add params to string as well. Eval might not be so secure to use...
+                site_data = globals()[func](site.time_start,site.time_end,station.Station_ID)
+                Ttype=station.Grid.Ttype
+                if site_data.empty: print('There is no data available at station ' + str(station['Station_Name']))
+            else: 
+                print('There is no buoy with given ID: ' + str(site.force_id) + ' for the site ' + site.name)
+                continue
+
+        if site_data.empty:  
+            
+            if not stations.empty: df_iter = stations.copy()
+            else: df_iter = buoy_network.copy()
+            #for row in (stations.itertuples() if not stations.empty else buoy_network.itertuples()):
+            for row in df_iter.itertuples():
+            #find the nearest point to the wanted site
+                distance = site.coordinates.distance(Coordinates(row.Latitude,row.Longitude))
+                df_iter.loc[row.Index,'distance'] = round(distance,2)
+                #row.distance = distance
+                #the limit for difference in the distance is set to 3km
+                if distance < max_distance:
+                    if distance < 3:
+                        #print('found new buoy closer than 3 km') 
+                        buoys=buoys.append([row])
+                        #buoys = buoys.append(row)
+                    #for the buoys having distances higher than 3 km, trying to have the closest among them..
+                    elif distance < min_dist:
+                        min_dist = distance
+                        #this is to save an extra close buoy in case the most closest ones does not have data
+                        closest_buoy = row
+            #if a buoy has found from the dataframe, call the related notebook
+            #when there are more than one station, then take the first one giving data and show others to the user..
+            if not buoys.empty:
+                buoys.reset_index(inplace=True, drop=True)
+                #data= list()
+                #gather all buoys data and compare within each other...
+                data = {}
+                site_data = pd.DataFrame()             
+                for buoy in buoys.itertuples():
+                    notebook =  buoy.Grid.name+'.ipynb'
+                    func = buoy.Grid.function
+                    %run $notebook
+                    #eval(func) #to use eval, add params to string as well. Eval might not be so secure to use...
+                    df = globals()[func](site.time_start,site.time_end,buoy.Station_ID)
+
+                    if not df.empty:
+                        #data.append(df)
+                        data[buoy.Station_ID] = df
+                        if site_data.empty: 
+                            site_data = df
+                            Ttype=buoy.Grid.Ttype
+                            closest_buoy=buoy
+                    #until one of the buoys get some data...
+                    
+                if len(buoys) > 1:
+                    #if there are other buoys having same/similar coordinates, display them to the user, and finish the loop..
+                    print('For the site ' + site.name + ' there are more than one buoys found for the location.')
+                    print('All available buoys: ')
+                    if site_data.empty:
+                        print('None of the buoys provided data')
+                    else:
+                        print('Data gathered from: ')
+                        #display(pd.DataFrame(closest_buoy))
+                        display(pd.DataFrame([closest_buoy]))
+                        if len(data) > 1 and (end_year-start_year <= 1):
+                            print('Monthly comparison of all buoys data:')
+                            display(df_monthly_comparison(data))
+                    print('In order to get data from another buoy, add selected buoys station id as a force_id parameter to the corresponding site input.')
+                
+            if site_data.empty and not len(closest_buoy)==0:
+            #that means there is an extra buoy which is the closest after other most close buoys..
+                notebook = closest_buoy.Grid.name+'.ipynb'
+                func = closest_buoy.Grid.function
+                %run $notebook
+                site_data = globals()[func](site.time_start,site.time_end,closest_buoy.Station_ID)
+                Ttype=closest_buoy.Grid.Ttype
+
+            #if there is no data retreived, then look at the regional/global model datasets    
+            if site_data.empty:
+                print('Site ', site.name, ' has no data available. No buoy/s provided data. Getting data from a model')
+                site2=site
+                site2.force_db=None
+                %run Wave_grid_filter.ipynb
+                site_data,Ttype = get_model_data(site2) 
+
+                #path_list=list(buoy.Grid.dir_path.split('/'))
+                #path_list.append(buoy.Grid.name+'.ipynb')
+                #path1 = os.path.join(*path_list)
+
+                #if buoy['LastDataMeasured']:
+                #if (int(buoy['LastDataMeasured']) < int(time_start[0:4])):
+        site_data.columns=[site_data.columns[0]+'_'+site.name,site_data.columns[1]+'_'+site.name]
+        if not Data:
+            Data = {'site names' : [site.name],
+                'latitudes' : [site.coordinates.latitude],
+                'longitudes' : [site.coordinates.longitude], 
+                #'Hs' : ['Hs(m)_' + site.name],
+                'Hs' : [site_data.columns[0]],
+                #'T' : [{'name':'Tp(s)_' + site.name , 'type':Ttype}]}
+                'T' : [{'name':site_data.columns[1], 'type':Ttype}]}
+
+            if not len(closest_buoy)==0:
+                Data.update({'nearest buoys': [{'station id': closest_buoy.Station_ID,
+                                               'latitude': closest_buoy.Latitude,
+                                               'longitude': closest_buoy.Longitude,
+                                               'distance (km)': min_dist}]})
+            Data.update({'timeSeries' : site_data[time_start : time_end]})
+            
+        else:
+            if Data['timeSeries'].index.freq != site_data.index.freq:
+                warnings.warn(site.name+' does not have the samefrequency as the previous sites. It will be resampled')
+                site_data=site_data.asfreq(Data['timeSeries'].index.freq)
+            Data['timeSeries'] = Data['timeSeries'].join(site_data[time_start : time_end] , how='outer')# , lsuffix=('_'+Data['site names'][-1]), rsuffix=('_'+site.name))
+            Data['site names'].append(site.name)
+            Data['latitudes'].append(site.coordinates.latitude)
+            Data['longitudes'].append(site.coordinates.longitude)
+            #Data['Hs'].append('Hs(m)_' + site.name)
+            #Data['T'].append({'name':'Tp(s)_' + site.name,'type':Ttype})
+            Data['Hs'].append(site_data.columns[0])
+            Data['T'].append({'name':site_data.columns[1],'type':Ttype})
+            if not len(closest_buoy)==0:
+                if 'nearest buoys' in Data:
+                    Data['nearest buoys'].append({'station id': closest_buoy.Station_ID,
+                                                 'latitude': closest_buoy.Latitude,
+                                                 'longitude': closest_buoy.Longitude,
+                                                 'distance (km)': min_dist})
+                else:
+                    Data.update({'nearest buoys': [{'station id': closest_buoy.Station_ID,
+                                                   'latitude': closest_buoy.Latitude,
+                                                   'longitude': closest_buoy.Longitude,
+                                                   'distance (km)': min_dist}]})
+    os.chdir(currPath)
+            
+    return Data
+```
+
+```{python active="", eval=FALSE}
+#Time interval
+start = '20110101T00'
+end = '20111231T23'
+
+sites=[Site('San Nicolas Island',Coordinates(33.22,-119.88), force_id=27683)]
+get_buoy_data(sites,start,end)
+```
+
+```{python active="", eval=FALSE}
+#808
+dropped = [x.drop_duplicates(subset=['Latitude','Longitude'])]
+
+dropped
+```
+
+```{python active="", eval=FALSE}
+df = x[x.duplicated(subset=['Latitude','Longitude'], keep=False)]        #257
+#df = x[x.duplicated(subset=['Latitude','Longitude'], keep='first')]     #133
+#df = x[x.duplicated(subset=['Latitude','Longitude'], keep='last')]      #133
+
+#df = x[x.duplicated(subset=['Station_Name'], keep=False)]
+
+df=df.sort_values(by=['Latitude'])
+df
+
+
+#df['Grid'].loc[df['Grid'].apply(lambda x: 'California_CDIP' in (x))]
+#df.loc[df['Grid'].name=='California_CDIP']
+```
+
+```{python active="", eval=FALSE}
+#print (x.dtypes)
+
+#df = x[x.duplicated(subset=['Latitude','Longitude'], keep=False)]
+#df = x[x.duplicated(subset=['Latitude','Longitude'], keep='first')]
+df = x[x.duplicated(subset=['Latitude','Longitude'], keep='last')]
+
+#df = x[x.duplicated(subset=['Station_Name'], keep=False)]
+
+df=df.sort_values(by=['Latitude'])
+#df.to_csv('./data/buoy_list/allPlatforms.csv', index=False)
+df
+
+# sub-list check
+```
+
+```{python active="", eval=FALSE}
+
+#3667	41099	MO
+#17361	4100099	MO
+#vtpk:
+#3667	41099	MO
+
+'''
+ravel() is an array method than returns a view (if possible) of a multidimensional array. 
+The argument 'K' tells the method to flatten the array in the order the elements are stored in memory 
+(pandas typically stores underlying arrays in Fortran-contiguous order; columns before rows). 
+This can be significantly faster than using the method's default 'C' order.
+'''
+
+pd.unique(x[['Latitude', 'Longitude']].values.ravel('K'))
+
+len(pd.concat([x['Latitude'], x['Longitude']]).unique())   #1408
+
+unique = x.groupby(['Latitude', 'Longitude']).size().reset_index(name='Freq')
+#unique.to_csv('./data/buoy_list/allPlatforms_unique.csv', index=False)
+#print (x['Latitude'] == unique['Latitude'])
+print(unique)
+
+```
+
+```{python active="", eval=FALSE}
+x['Station_ID']=x['Station_ID'].astype(str)
+
+x['Station_ID'].describe()
+
+#x.loc[x['Grid'].apply(lambda x: x.name=='NDBC')]
+
+#x.loc[x.Station_ID == '46014']
+
+#x['Latitude'] = x['Latitude'].round(2)
+
+#unique buoys
+#same lat.lon
+#priority
+#distance differ 20m
+
+```
+
+```{python active="", eval=FALSE}
+start='20170506'
+end='20181231'
+# 
+s = Site('X' , Coordinates(53.23 , -100.27))
+s2 = Site('Belmullet' , Coordinates(54.23 , -10.14))
+sites = [s,s2]
+get_buoy_data(sites, start, end, Database.WaveWatch3)
+```
+
+```{python active="", eval=FALSE}
+start='20170506'
+end='20181231'
+# 
+s = Site('X' , Coordinates(53.23 , -9.27))
+s2 = Site('Belmullet' , Coordinates(54.23 , -10.14))
+sites = [s,s2]
+get_buoy_data(sites, start, end, Database.Ireland)
+```
+
+```{python active="", eval=FALSE}
+#Time interval
+start = '20110101T00'
+end = '20111231T23'
+
+sites=[Site('San Nicolas Island',Coordinates(33.22,-119.88)),
+       Site('Cape Mendocino',Coordinates(40.29,-124.73)),
+       Site('Belmullet',Coordinates(54.13,10.13)),
+       Site('Galway',Coordinates(53.23, -9.27)),
+       Site('Harpswell',Coordinates(43.76,-69.99)),
+       Site('WESTERN HAWAII (Adrift)',Coordinates(19.289,-160.569)),
+       Site('Maili',Coordinates(21.41,-158.18))]
+
+get_buoy_data(sites,start,end)
+```
+
+```{python active="", eval=FALSE}
+#Time interval
+start = '20110101T00'
+end = '20111231T23'
+
+sites=[Site('San Nicolas Island',Coordinates(33.22,-119.88)),
+       Site('Cape Mendocino',Coordinates(40.29,-124.73)),
+       Site('Belmullet',Coordinates(54.13,10.13)),
+       Site('Galway',Coordinates(53.23, -9.27)),
+       Site('Harpswell',Coordinates(43.76,-69.99)),
+       Site('WESTERN HAWAII (Adrift)',Coordinates(19.289,-160.569)),
+       Site('Maili',Coordinates(21.41,-158.18))]
+
+get_buoy_data(sites,start,end)
+```
+
+```{python active="", eval=FALSE}
+#Time interval
+start = '20110101T00'
+end = '20111231T23'
+
+sites=[Site('San Nicolas Island',Coordinates(33.22,-119.88), force_db=Database.Emodnet)]
+get_buoy_data(sites,start,end)
+```
+
+```{python active="", eval=FALSE}
+#Time interval
+start = '20110101T00'
+end = '20111231T23'
+
+sites=[Site('San Nicolas Island',Coordinates(33.22,-119.88)),
+       Site('Cape Mendocino',Coordinates(40.29,-124.73)),
+       Site('Belmullet',Coordinates(54.13,10.13)),
+       Site('Galway',Coordinates(53.23, -9.27)),
+       Site('Harpswell',Coordinates(43.76,-69.99)),
+       Site('WESTERN HAWAII (Adrift)',Coordinates(19.289,-160.569)),
+       Site('Maili',Coordinates(21.41,-158.18))]
+
+get_buoy_data(sites,start,end)
+```
